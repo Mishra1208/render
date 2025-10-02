@@ -116,14 +116,21 @@ async function searchReddit({ subreddits, searchQ, afterTs, limit, perCallTimeou
 let _browserPromise = null;
 async function getBrowser() {
   if (!_browserPromise) {
-    _browserPromise = puppeteer.launch({
+    const { executablePath } = require("puppeteer"); // keep this import at top or here
+    const flags = (process.env.CHROME_FLAGS || "--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --headless=new").split(" ");
+
+    const exe = executablePath(); // <- use the path that puppeteer installed
+    console.log("[puppeteer] using chrome at:", exe);
+
+    _browserPromise = require("puppeteer-extra").launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      executablePath: process.env.CHROME_PATH || executablePath(),
+      args: flags,
+      executablePath: exe,        // <— key line
     });
   }
   return _browserPromise;
 }
+
 
 // graceful shutdown
 async function closeBrowser() {

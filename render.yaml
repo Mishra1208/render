@@ -21,17 +21,15 @@ services:
     name: conu-community
     env: node
     plan: free
-    rootDir: conu-community   # <-- backend folder
+    rootDir: conu-community
     buildCommand: npm ci && npx puppeteer browsers install chrome
     startCommand: npm run start
-    autoDeploy: true
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
       - key: NODE_VERSION
         value: 20
-      # Reddit credentials (add values in Render dashboard)
       - key: REDDIT_USER_AGENT
         sync: false
       - key: REDDIT_CLIENT_ID
@@ -42,8 +40,5 @@ services:
         sync: false
       - key: REDDIT_PASSWORD
         sync: false
-      # Puppeteer on Render
-      - key: PUPPETEER_EXECUTABLE_PATH
-        value: /usr/bin/google-chrome-stable
       - key: CHROME_FLAGS
         value: --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --headless=new
