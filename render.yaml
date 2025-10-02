@@ -8,14 +8,11 @@ services:
     startCommand: cd frontend && npm run start -- -p 3000
     autoDeploy: true
     envVars:
-      # Wire frontend to the community backend URL at deploy time
       - key: COMMUNITY_API_URL
-        fromService:
-          name: conu-community
-          type: web
-          property: url
+        value: https://conu-community.onrender.com
       - key: NODE_ENV
         value: production
+
 
   # --- Community backend (Express + Puppeteer + Snoowrap) ---
   - type: web
