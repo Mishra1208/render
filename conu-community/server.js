@@ -456,7 +456,8 @@ app.get("/api/rmp", async (req, res) => {
 
 /* --------------------------------- Start -------------------------------- */
 const port = process.env.PORT || 4000;
-const host = process.env.HOST || "127.0.0.1";
-app.listen(port, host, () => {
-  console.log(`Community service listening on http://${host}:${port}`);
+
+
+app.listen(port, () => {
+  console.log(`Community service listening on port ${port}`);
 });
