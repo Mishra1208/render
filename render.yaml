@@ -1,0 +1,47 @@
+services:
+  # --- Frontend (Next.js) ---
+  - type: web
+    name: conu-planner-frontend
+    env: node
+    plan: free
+    buildCommand: cd frontend && npm ci && npm run build
+    startCommand: cd frontend && npm run start -- -p 3000
+    autoDeploy: true
+    envVars:
+      # Wire frontend to the community backend URL at deploy time
+      - key: COMMUNITY_API_URL
+        fromService:
+          name: conu-community
+          type: web
+          property: url
+      - key: NODE_ENV
+        value: production
+
+  # --- Community backend (Express + Puppeteer + Snoowrap) ---
+  - type: web
+    name: conu-community
+    env: node
+    plan: free
+    buildCommand: cd conu-community && npm ci && npx puppeteer browsers install chrome
+    startCommand: cd conu-community && npm run start
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Reddit credentials (add values in Render dashboard)
+      - key: REDDIT_USER_AGENT
+        sync: false
+      - key: REDDIT_CLIENT_ID
+        sync: false
+      - key: REDDIT_CLIENT_SECRET
+        sync: false
+      - key: REDDIT_USERNAME
+        sync: false
+      - key: REDDIT_PASSWORD
+        sync: false
+      # Puppeteer on Render
+      - key: PUPPETEER_EXECUTABLE_PATH
+        value: /usr/bin/google-chrome-stable
+      - key: CHROME_FLAGS
+        value: --no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --headless=new
