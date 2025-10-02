@@ -4,28 +4,33 @@ services:
     name: conu-planner-frontend
     env: node
     plan: free
-    buildCommand: cd frontend && npm ci && npm run build
-    startCommand: cd frontend && npm run start -- -p 3000
+    rootDir: .             # <-- frontend is at repo root
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- -p 3000
     autoDeploy: true
     envVars:
       - key: COMMUNITY_API_URL
         value: https://conu-community.onrender.com
       - key: NODE_ENV
         value: production
-
+      - key: NODE_VERSION
+        value: 20
 
   # --- Community backend (Express + Puppeteer + Snoowrap) ---
   - type: web
     name: conu-community
     env: node
     plan: free
-    buildCommand: cd conu-community && npm ci && npx puppeteer browsers install chrome
-    startCommand: cd conu-community && npm run start
+    rootDir: conu-community   # <-- backend folder
+    buildCommand: npm ci && npx puppeteer browsers install chrome
+    startCommand: npm run start
     autoDeploy: true
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: 20
       # Reddit credentials (add values in Render dashboard)
       - key: REDDIT_USER_AGENT
         sync: false
