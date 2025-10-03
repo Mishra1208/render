@@ -368,51 +368,64 @@ function extractProfFromProfileHtml(html) {
   }
 
   // Difficulty again from full-body text
-  // Difficulty: be very liberal — look around the label, aria labels, and nearby containers
-  if (!info.difficulty) {
-    const normTxt = (el) => norm($(el).text() || "");
+ // ---- Difficulty (robust, anchored to the label) ----
+if (!info.difficulty) {
+  // helper that finds 0–5 (one decimal) near the label ONLY
+  const pickDifficulty = (txt) => {
+    // number AFTER the label within ~20 non-digits
+    let m = txt.match(/Level\s*of\s*Difficulty\D{0,20}([0-4](?:\.\d)?|5(?:\.0)?)/i);
+    if (m) return m[1];
+    // number BEFORE the label within ~10 non-letters (sometimes the number precedes)
+    m = txt.match(/([0-4](?:\.\d)?|5(?:\.0)?)\s*(?:\/\s*5)?[^A-Za-z]{0,10}Level\s*of\s*Difficulty/i);
+    if (m) return m[1];
+    return null;
+  };
 
-    // 1) Any element that literally contains the label
-    const labelNode = $('*:contains("Level of Difficulty")').first();
-    const searchZones = [];
-
-    if (labelNode.length) {
-      searchZones.push(labelNode);
-      // siblings and parents often hold the numeric value
-      searchZones.push(labelNode.next());
-      searchZones.push(labelNode.prev());
-      const parent = labelNode.parent();
-      if (parent.length) {
-        searchZones.push(parent);
-        searchZones.push(parent.children().eq(0));
-        searchZones.push(parent.children().eq(1));
-      }
-      // sometimes the number is a little higher up
-      const gparent = parent.parent();
-      if (gparent.length) searchZones.push(gparent);
+  // 1) Look for a node that contains the label, then search very close around it
+  const labelNode = $('*').filter((_, el) => /Level\s*of\s*Difficulty/i.test($(el).text())).first();
+  if (labelNode.length) {
+    const zones = [];
+    zones.push(labelNode);
+    zones.push(labelNode.next());
+    zones.push(labelNode.prev());
+    const parent = labelNode.parent();
+    if (parent.length) {
+      zones.push(parent);
+      zones.push(parent.children().eq(0));
+      zones.push(parent.children().eq(1));
     }
+    const gp = parent.parent();
+    if (gp.length) zones.push(gp);
 
-    // 2) Elements with an aria-label mentioning the phrase
-    $('*[aria-label]').each((_, el) => {
-      const aria = ($(el).attr('aria-label') || '').toLowerCase();
-      if (aria.includes('level of difficulty')) searchZones.push(el);
-    });
-
-    // 3) The whole body as a final safety net
-    searchZones.push('body');
-
-    // Scan each zone for a strict 0–5 number (allows one decimal)
-    let found = null;
-    for (const z of searchZones) {
-      const txt = typeof z === 'string' ? normTxt(z) : normTxt(z);
-      // Prefer patterns that keep the label close to the number
-      found = firstMatch(txt, /Level\s*of\s*Difficulty[^0-9]*([0-4](?:\.\d)?|5(?:\.0)?)/i)
-           || firstMatch(txt, /([0-4](?:\.\d)?|5(?:\.0)?)\s*(?:\/\s*5)?\s*(?:Level\s*of\s*Difficulty)/i)
-           || firstMatch(txt, /\b(?:Difficulty|level of difficulty)\s*[:\s]*([0-4](?:\.\d)?|5(?:\.0)?)\b/i);
-      if (found) break;
+    for (const z of zones) {
+      if (!z || !z.length) continue;
+      const txt = (z.text() || "")
+        .replace(/\u00A0/g, " ").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+      const d = pickDifficulty(txt);
+      if (d) { info.difficulty = d; break; }
     }
-    if (found) info.difficulty = found;
   }
+
+  // 2) aria-label variants
+  if (!info.difficulty) {
+    const ariaNode = $('*[aria-label]').filter((_, el) =>
+      /level\s*of\s*difficulty/i.test($(el).attr('aria-label') || "")
+    ).first();
+    if (ariaNode.length) {
+      const ariaTxt = (ariaNode.attr('aria-label') || "").trim();
+      const d = pickDifficulty(ariaTxt);
+      if (d) info.difficulty = d;
+    }
+  }
+
+  // 3) last-ditch: full body (still anchored to label so it won't grab “/ 5”)
+  if (!info.difficulty) {
+    const body = $("body").text().replace(/\u00A0/g, " ").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+    const d = pickDifficulty(body);
+    if (d) info.difficulty = d;
+  }
+}
+
 
 
 
