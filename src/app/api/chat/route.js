@@ -20,25 +20,9 @@ function log(...a) { if (DEV) console.log("[community]", ...a); }
 function looksLikeProfessorName(q = "") {
   const s = q.trim();
   if (!s) return false;
-  if (/\b[A-Z]{3,4}\s*-?\s*\d{3}\b/.test(s)) return false;
+  if (/\b[A-Z]{3,4}\s*-?\s*\d{3}\b/.test(s)) return false; // course code
   if (/\b(credit|credits|prereq|prerequisite|term|session|offered|location|campus)\b/i.test(s)) return false;
   return /^[A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){1,3}$/.test(s);
-}
-
-// used only for trimming the “QUALITY … ratings” preamble etc.
-function cleanName(raw, dept, school) {
-  let s = String(raw || "");
-  s = s.replace(/^QUALITY\s*[\d.]+\s*\d+\s*ratings\s*/i, "");
-  if (dept) {
-    const reDept = new RegExp(`\\b${dept.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "i");
-    s = s.replace(reDept, "");
-  }
-  if (school) {
-    const reSch = new RegExp(`\\b${school.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "i");
-    s = s.replace(reSch, "");
-  }
-  s = s.replace(/\b(University|College|Department|School)\b.*$/i, "");
-  return s.replace(/\s+/g, " ").trim();
 }
 
 function formatRow(label, value) {
@@ -46,7 +30,6 @@ function formatRow(label, value) {
   return `<div class="kv"><span class="k">${label}</span><span class="v">${v}</span></div>`;
 }
 
-// FINAL GUARANTEE: if the API didn’t populate difficulty/department, pull from blockText.
 function deriveFromBlockText(blockText) {
   const t = (blockText || "");
   const difficulty =
@@ -60,111 +43,78 @@ function deriveFromBlockText(blockText) {
 }
 
 async function fetchRmpBlock(name) {
-  const norm = (s = "") =>
-    String(s).replace(/\u00A0/g, " ").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim();
-
-  const extractHumanName = (raw, fallbacks = []) => {
-    const text = norm(raw);
-    const stripped = text.replace(/^QUALITY\s*[\d.]+\s*\d+\s*ratings\s*/i, "");
-    const m =
-      text.match(/([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})/) ||
-      (fallbacks[0] && norm(fallbacks[0]).match(/([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})/));
-    return (m && (m[1] || m[0])) ? (m[1] || m[0]).trim() : (fallbacks[0] || "");
-  };
-
-  const row = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v">${(v ?? "—")}</span></div>`;
-
   try {
-    const url = new URL("/api/rmp", COMMUNITY_API);
-    url.searchParams.set("name", name);
-    url.searchParams.set("all", "0"); // Concordia-only
-    const r = await fetch(url.toString(), { cache: "no-store" });
-    if (!r.ok) return null;
-    const data = await r.json();
+    const norm = (s = "") =>
+      String(s).replace(/\u00A0/g, " ").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+
+    const extractHumanName = (raw, fallbacks = []) => {
+      const text = norm(raw);
+      const stripped = text.replace(/^QUALITY\s*[\d.]+\s*\d+\s*ratings\s*/i, "");
+      const m =
+        text.match(/([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})/) ||
+        (fallbacks[0] && norm(fallbacks[0]).match(/([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})/));
+      return (m && (m[1] || m[0])) ? (m[1] || m[0]).trim() : (fallbacks[0] || "");
+    };
+
+    async function call(allFlag) {
+      const url = new URL("/api/rmp", COMMUNITY_API);
+      url.searchParams.set("name", name);
+      url.searchParams.set("all", allFlag ? "1" : "0");
+      const r = await fetch(url.toString(), { cache: "no-store" });
+      if (!r.ok) return null;
+      return r.json().catch(() => null);
+    }
+
+    const first = await call(false);
+    const data = first?.count ? first : (await call(true)); // retry with all=1
+
     if (!data || !data.count || !data.top) return null;
 
     const t = data.top;
-
-    // ✅ Only the human name — strip dept/school tails
-    let profName = extractHumanName(t.name, [t.blockText, name]);
-    profName = cleanName(profName, t.dept, t.school);
-
     const derived = deriveFromBlockText(t.blockText || "");
+
+    let profName = extractHumanName(t.name, [t.blockText, name]);
+    profName = profName.replace(/\b(University|College|Department|School)\b.*$/i, "").trim();
+
     const profDept = t.dept || derived.dept || "—";
     const profDiff = t.difficulty || derived.difficulty || "—";
-
     const ratingsN = t.numRatings ? String(t.numRatings).replace(/\D+/g, "") : null;
     const qualityLine = ratingsN
       ? `Overall quality (based on ${ratingsN} rating${ratingsN === "1" ? "" : "s"}):`
       : "Overall quality:";
 
-    const topBlock =
-      row("Professor Name:", profName) +
-      row("Dept:", profDept) +
-      row("School:", t.school || "Concordia University") +
-      row(qualityLine, t.quality || "—") +
-      row("Would take again:", t.wouldTakeAgain ? `${t.wouldTakeAgain}%` : "—") +
-      row("Level of difficulty:", profDiff || "—") +
-      (t.url
-        ? `<div class="kv"><span class="k">Profile:</span><span class="v"><a href="${t.url}" target="_blank" rel="noreferrer">Click here</a></span></div>`
-        : "");
+    const rowBlock =
+      formatRow("Professor Name:", profName) +
+      formatRow("Dept:", profDept) +
+      formatRow("School:", t.school || data.school || "—") +
+      formatRow(qualityLine, t.quality || "—") +
+      formatRow("Would take again:", t.wouldTakeAgain ? `${t.wouldTakeAgain}%` : "—") +
+      formatRow("Level of difficulty:", profDiff || "—") +
+      (t.url ? `<div class="kv"><span class="k">Profile:</span><span class="v"><a href="${t.url}" target="_blank" rel="noreferrer">Click here</a></span></div>` : "");
 
-    const others = (data.others || [])
-      .slice(0, 4)
-      .map((o) => {
-        const oDerived = deriveFromBlockText(o.blockText || "");
-        let nm = extractHumanName(o.name, [o.blockText]);
-        nm = cleanName(nm, o.dept, o.school); // ✅ clean other names too
-        return `
-          <li>
-            <div class="other">
-              ${row("Professor Name:", nm)}
-              ${row("Dept:", o.dept || oDerived.dept || "—")}
-              ${row("School:", o.school || "—")}
-              ${row("Overall quality:", o.quality || "—")}
-              ${row("Would take again:", o.wouldTakeAgain ? `${o.wouldTakeAgain}%` : "—")}
-              ${row("Level of difficulty:", o.difficulty || oDerived.difficulty || "—")}
-              ${
-                o.url
-                  ? `<div class="kv"><span class="k">Profile:</span><span class="v"><a href="${o.url}" target="_blank" rel="noreferrer">Click here</a></span></div>`
-                  : ""
-              }
-            </div>
-          </li>`;
-      })
-      .join("");
+    const others = (data.others || []).slice(0, 4).map((o) => {
+      const oDerived = deriveFromBlockText(o.blockText || "");
+      let nm = extractHumanName(o.name, [o.blockText]);
+      return `
+        <li>
+          <div class="other">
+            ${formatRow("Professor Name:", nm)}
+            ${formatRow("Dept:", o.dept || oDerived.dept || "—")}
+            ${formatRow("School:", o.school || "—")}
+            ${formatRow("Overall quality:", o.quality || "—")}
+            ${formatRow("Would take again:", o.wouldTakeAgain ? `${o.wouldTakeAgain}%` : "—")}
+            ${formatRow("Level of difficulty:", o.difficulty || oDerived.difficulty || "—")}
+            ${o.url ? `<div class="kv"><span class="k">Profile:</span><span class="v"><a href="${o.url}" target="_blank" rel="noreferrer">Click here</a></span></div>` : ""}
+          </div>
+        </li>`;
+    }).join("");
 
     const html = `
       <style>
-        .kv { display:flex; gap:.5rem; line-height:1.6; }
-        .kv .k { min-width: 220px; font-weight:600; opacity:.9; }   /* inherit color */
-        .kv .v { opacity: 1; }
-        .other { padding:.5rem .75rem; border:1px solid rgba(0,0,0,.08); border-radius:8px; margin:.35rem 0; }
-        .rlinks { margin:.4rem 0 0 .2rem; padding-left:1rem; }
-        .rlinks li { margin:.35rem 0; }
-    .community .pill.rmp{
-       display: inline-block;
-       background: #3b82f6;      /* blue */
-       color: #fff;
-       font-weight: 700;
-       font-size: 10.5px;
-       letter-spacing: .35px;
-       padding: 3px 7px;
-       border-radius: 6px;
-       line-height: 1;
-       box-shadow: 0 1px 0 rgba(0,0,0,.08);
-       position: relative;       /* <-- needed so the tail positions correctly */
-       border: none;             /* ensure no orange border leaks in */
-    }
-   .community .pill.rmp::after{
-      content:"";
-      position:absolute;
-      bottom:-4px;
-      left:8px;
-      border-width:4px 4px 0 4px;
-      border-style:solid;
-      border-color:#3b82f6 transparent transparent transparent; /* match the blue */
-   }     
+        .kv{display:flex;gap:.5rem;line-height:1.6}.kv .k{min-width:220px;font-weight:600;opacity:.9}.kv .v{opacity:1}
+        .other{padding:.5rem .75rem;border:1px solid rgba(0,0,0,.08);border-radius:8px;margin:.35rem 0}
+        .community .pill.rmp{display:inline-block;background:#3b82f6;color:#fff;font-weight:700;font-size:10.5px;letter-spacing:.35px;padding:3px 7px;border-radius:6px;line-height:1;box-shadow:0 1px 0 rgba(0,0,0,.08);position:relative;border:none}
+        .community .pill.rmp::after{content:"";position:absolute;bottom:-4px;left:8px;border-width:4px 4px 0 4px;border-style:solid;border-color:#3b82f6 transparent transparent transparent}
       </style>
       <div class="community minimalist">
         <div class="topline">
@@ -172,13 +122,8 @@ async function fetchRmpBlock(name) {
           <span class="pill rmp">RMP</span>
         </div>
         <div class="msg">
-          <div class="card">
-            ${topBlock}
-          </div>
-          ${others ? `<div style="margin-top:10px;">
-              <strong>Other matches (Concordia):</strong>
-              <ul class="rlinks">${others}</ul>
-            </div>` : ""}
+          <div class="card">${rowBlock}</div>
+          ${others ? `<div style="margin-top:10px;"><strong>Other matches:</strong><ul class="rlinks">${others}</ul></div>` : ""}
         </div>
         <div class="rfoot">Unofficial community ratings from RateMyProfessors.</div>
       </div>
@@ -188,6 +133,7 @@ async function fetchRmpBlock(name) {
     return null;
   }
 }
+
 
 /* --------------------------- Reddit helpers --------------------------- */
 function looksCommunityQuestion(q = "") {
@@ -348,7 +294,9 @@ export async function POST(req){
     if (RMP_ENABLED && looksLikeProfessorName(message)) {
       const html = await fetchRmpBlock(message);
       if (html) return NextResponse.json({ html });
-      // fallthrough if RMP fails
+      // friendly fallback instead of CSV
+      const reply = "I couldn’t find a RateMyProfessors profile for that name right now. Try the full name (e.g., “Aiman Hanna”), or try again later.";
+      return NextResponse.json({ reply, message: reply, answer: reply, text: reply });
     }
 
     // 2) Community-style question → Reddit
@@ -365,7 +313,6 @@ export async function POST(req){
           sources: community.sources
         });
       }
-      log("community fallback → CSV");
     }
 
     // 3) CSV fallback
@@ -389,5 +336,3 @@ export async function POST(req){
     return NextResponse.json({ reply, message: reply, answer: reply, text: reply }, { status: 500 });
   }
 }
-
-

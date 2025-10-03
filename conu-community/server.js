@@ -347,26 +347,23 @@ app.get("/api/rmp", async (req, res) => {
   return Array.from(uniq.values());
 }, normJS);
 
+// AFTER: prefer Concordia; if none, use all results so we still return something
+let pool;
+if (String(all) === "true" || all) {
+  pool = results;
+} else {
+  const conly = results.filter(
+    (r) =>
+      (r.school && /concordia university/i.test(r.school)) ||
+      /concordia university/i.test(r.blockText || "")
+  );
+  pool = conly.length ? conly : results; // fallback to all schools
+}
 
 
 
 
 
-
-
-
-
-
-
-
-
-    const pool = (String(all) === "true" || all)
-      ? results
-      : results.filter(
-          (r) =>
-            (r.school && /concordia university/i.test(r.school)) ||
-            /concordia university/i.test(r.blockText || "")
-        );
 
     // 2) Enrich missing fields from profile
     const needsEnrich = pool.slice(0, 3).filter(
