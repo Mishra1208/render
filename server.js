@@ -1,17 +1,15 @@
-// conu-community/server.js
+// FRONTEND-ONLY/conu-community/server.js
 require("dotenv").config();
 const express = require("express");
 const morgan = require("morgan");
 const cors = require("cors");
 const Snoowrap = require("snoowrap");
+const cheerio = require("cheerio");
 
-const puppeteer = require("puppeteer-extra");
-const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-puppeteer.use(StealthPlugin());
-const { executablePath } = require("puppeteer");
-
+// Small util
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* ----------------------------- Express app ----------------------------- */
 const app = express();
 app.use(cors());
 app.use(morgan("tiny"));
@@ -110,29 +108,6 @@ async function searchReddit({ subreddits, searchQ, afterTs, limit, perCallTimeou
     .slice(0, limit);
 }
 
-/* -------------------- Puppeteer (Render-friendly) -------------------- */
-let _browserPromise = null;
-async function getBrowser() {
-  if (!_browserPromise) {
-    _browserPromise = puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--single-process",
-      ],
-      executablePath: process.env.CHROME_PATH || executablePath(),
-    });
-  }
-  return _browserPromise;
-}
-async function closeBrowser() {
-  try { const br = await _browserPromise; await br?.close(); } catch {}
-}
-process.on("SIGINT", async () => { await closeBrowser(); process.exit(0); });
-process.on("SIGTERM", async () => { await closeBrowser(); process.exit(0); });
-
 /* -------------------------- RMP cache --------------------------- */
 const RMP_CACHE = new Map();
 const RMP_TTL_MS = 24 * 60 * 60 * 1000;
@@ -213,9 +188,122 @@ app.get("/api/reddit/answer", async (req, res) => {
   }
 });
 
-/* ------------------------ RateMyProfessors scrape ----------------------- */
+/* ------------------------ RateMyProfessors (no browser) ----------------------- */
+const RMP_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Cache-Control": "no-cache",
+  "Pragma": "no-cache",
+  "Referer": "https://www.ratemyprofessors.com/",
+};
+
+function norm(s = "") {
+  return String(s)
+    .replace(/\u00A0/g, " ")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function fetchHtml(url, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const resp = await fetch(url, { headers: RMP_HEADERS, signal: controller.signal });
+  clearTimeout(timer);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
+  return await resp.text();
+}
+
+function extractProfFromProfileHtml(html) {
+  const $ = cheerio.load(html);
+  const nextJson = $("#__NEXT_DATA__").text();
+  const info = {};
+
+  // Helper to pull with regex from a string
+  const pull = (str, re) => {
+    const m = str.match(re);
+    return m ? m[1] : null;
+  };
+
+  try {
+    if (nextJson) {
+      // Use string search to be resilient across minor payload shape changes.
+      info.name =
+        pull(nextJson, /"teacherName":"([^"]+)"/) ||
+        (pull(nextJson, /"firstName":"([^"]+)"/) &&
+          pull(nextJson, /"lastName":"([^"]+)"/) &&
+          `${pull(nextJson, /"firstName":"([^"]+)"/)} ${pull(nextJson, /"lastName":"([^"]+)"/)}`);
+
+      info.dept =
+        pull(nextJson, /"teacherDepartment":"([^"]+)"/) ||
+        pull(nextJson, /"department":"([^"]+)"/);
+
+      info.school =
+        pull(nextJson, /"teacherInstitutionName":"([^"]+)"/) ||
+        pull(nextJson, /"institutionName":"([^"]+)"/);
+
+      info.quality = pull(nextJson, /"avgRating":\s*([\d.]+)/);
+      info.difficulty = pull(nextJson, /"avgDifficulty":\s*([\d.]+)/);
+      info.wouldTakeAgain = pull(nextJson, /"wouldTakeAgainPercent":\s*(-?\d+)/);
+      info.numRatings = pull(nextJson, /"numRatings":\s*(\d+)/);
+    }
+  } catch {
+    // ignore JSON parse failures; we'll try text fallback below
+  }
+
+  // Fallbacks (visible text)
+  if (!info.name) {
+    const h1 = norm($("h1").first().text());
+    if (h1) info.name = h1;
+  }
+  if (!info.quality) info.quality = pull(html, /Overall\s+Quality[^0-9]*([\d.]+)/i);
+  if (!info.difficulty) info.difficulty = pull(html, /Level\s+of\s+Difficulty[^0-9]*([\d.]+)/i);
+  if (!info.numRatings) info.numRatings = pull(html, /Based\s+on\s+(\d+)\s+ratings?/i);
+
+  if (info.wouldTakeAgain && Number(info.wouldTakeAgain) < 0) info.wouldTakeAgain = null;
+
+  return info;
+}
+
+async function rmpSearchAndProfile(name, schoolId) {
+  const searchUrl = `https://www.ratemyprofessors.com/search/professors/${schoolId}?q=${encodeURIComponent(
+    name
+  )}`;
+  const searchHtml = await fetchHtml(searchUrl, 12000);
+  const $ = cheerio.load(searchHtml);
+
+  // pick first result link to /professor/<id>
+  const href = $('a[href^="/professor/"]').first().attr("href");
+  if (!href) return { count: 0, searchUrl };
+
+  const profileUrl = `https://www.ratemyprofessors.com${href}`;
+  const profileHtml = await fetchHtml(profileUrl, 12000);
+  const info = extractProfFromProfileHtml(profileHtml);
+
+  const ok = info.name || info.quality || info.numRatings;
+  return ok
+    ? {
+        count: 1,
+        top: {
+          name: info.name || name,
+          dept: info.dept || null,
+          school: info.school || "Concordia University",
+          quality: info.quality || null,
+          difficulty: info.difficulty || null,
+          wouldTakeAgain: info.wouldTakeAgain || null,
+          numRatings: info.numRatings || null,
+          url: profileUrl,
+        },
+        others: [],
+        searchUrl,
+      }
+    : { count: 0, searchUrl };
+}
+
 app.get("/api/rmp", async (req, res) => {
-  const name = (req.query.name || "").trim();
+  const name = norm(req.query.name || "");
   const all = String(req.query.all || "0") === "1";
   const SCHOOL_ID = process.env.RMP_SCHOOL_ID || "18443"; // Concordia
   const SCHOOL_NAME = "Concordia University";
@@ -225,211 +313,22 @@ app.get("/api/rmp", async (req, res) => {
   const cached = rmpGet(name, all);
   if (cached) return res.json(cached);
 
-  // Try both search URL variants
-  const candidates = [
-    `https://www.ratemyprofessors.com/search/professors?q=${encodeURIComponent(name)}&sid=${SCHOOL_ID}`,
-    `https://www.ratemyprofessors.com/search/professors/${SCHOOL_ID}?q=${encodeURIComponent(name)}`,
-  ];
-
-  const OVERALL_TIMEOUT_MS = 20000;
-  let overallTimer;
-  const hardFail = (reason) => {
-    clearTimeout(overallTimer);
-    res.status(504).json({ error: "RMP scrape failed", detail: reason || "timeout" });
-  };
-  overallTimer = setTimeout(() => hardFail("overall-timeout"), OVERALL_TIMEOUT_MS);
-
-  // function body will run in browser; norm is passed as a string
-  const normJS = `
-    (s)=> (s||"")
-      .replace(/\\u00A0/g," ")
-      .replace(/[\\u200B-\\u200D\\uFEFF]/g,"")
-      .replace(/\\s+/g," ")
-      .trim()
-  `;
-
-  let page;
   try {
-    const browser = await getBrowser();
-    page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900 });
-    await page.setUserAgent(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    );
-    await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+    const out = await rmpSearchAndProfile(name, SCHOOL_ID);
 
-    // Open first good candidate
-    let ok = false;
-    for (const url of candidates) {
-      const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
-      const status = resp ? resp.status() : 0;
-      if (status && status < 400) { ok = true; break; }
-    }
-    if (!ok) throw new Error("All RMP search URL variants returned an error (e.g., 404)");
-
-    await sleep(900);
-    try {
-      await page.waitForSelector('a[href^="/professor/"], [data-testid*="noResults"], [class*="NoResults"]', { timeout: 6000 });
-    } catch {}
-
-    // ---------- FIXED: single backslashes in regex literals ----------
-    const results = await page.evaluate((normStr) => {
-      const norm = eval(normStr);
-      const anchors = Array.from(document.querySelectorAll('a[href^="/professor/"]'));
-      if (!anchors.length) return [];
-
-      const pickName = (raw) => {
-        const s = norm(raw);
-        const m = s.match(/^[A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){1,3}$/);
-        return m ? m[0] : s;
-      };
-
-      const uniq = new Map();
-      for (const a of anchors) {
-        const href = a.getAttribute("href");
-        const card =
-          a.closest("article") ||
-          a.closest('[class*="Card"]') ||
-          a.closest("section") ||
-          a.closest("div");
-
-        const txt = norm(card?.innerText || a.innerText || document.body.innerText || "");
-        const name = pickName(a.innerText || a.textContent || txt);
-
-        const quality =
-          (txt.match(/QUALITY\s*([\d.]+)/i) || [])[1] ||
-          (txt.match(/\boverall quality\b.*?([\d.]+)/i) || [])[1] ||
-          (txt.match(/\b([\d.]+)\s*(?:quality|overall)\b/i) || [])[1] ||
-          null;
-
-        let difficulty = null;
-        let m =
-          txt.match(/level\s*of\s*difficulty\s*[:\s]*([\d.]{1,3})(?:\s*\/\s*5)?/i) ||
-          txt.match(/([\d.]{1,3})\s*level\s*of\s*difficulty/i) ||
-          txt.match(/difficulty\s*[:\s]*([\d.]{1,3})/i);
-        if (m) difficulty = m[1];
-
-        const would =
-          (txt.match(/(\d{1,3})%\s*would\s*take\s*again/i) || [])[1] ||
-          (txt.match(/would\s*take\s*again\s*[:\s]+(\d{1,3})%/i) || [])[1] || null;
-
-        const numRatings = (txt.match(/(\d+)\s*ratings?/i) || [])[1] || null;
-
-        const schoolMatch =
-          txt.match(/\bConcordia University\b/i) ||
-          txt.match(/\b[A-Za-z .'-]*University\b/i);
-        const school = schoolMatch ? schoolMatch[0].trim() : null;
-
-        const deptMatch = txt.match(
-          /\b(Computer Science|Mathematics|Engineering|Biology|Chemistry|Physics|Statistics|Business|Finance|Accounting|Marketing|Psychology|Sociology|Philosophy|History|Political Science|Fine Arts|Anthropology|Film|Social Science|Social Sciences)\b/i
-        );
-        const dept = deptMatch ? deptMatch[0] : null;
-
-        if (href && name && !uniq.has(href)) {
-          uniq.set(href, {
-            name, school, dept, quality, difficulty,
-            wouldTakeAgain: would, numRatings,
-            url: `https://www.ratemyprofessors.com${href}`,
-            blockText: txt,
-          });
-        }
-      }
-      return Array.from(uniq.values());
-    }, normJS);
-
-    const pool = (String(all) === "true" || all)
-      ? results
-      : results.filter(
-          (r) =>
-            (r.school && /concordia university/i.test(r.school)) ||
-            /concordia university/i.test(r.blockText || "")
-        );
-
-    const needsEnrich = pool.slice(0, 3).filter(
-      (r) => !r.difficulty || !r.quality || !r.numRatings || !r.dept
-    );
-
-    for (const t of needsEnrich) {
-      try {
-        const resp = await page.goto(t.url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
-        if (!resp || resp.status() >= 400) continue;
-        await sleep(600);
-
-        // ---------- FIXED: single backslashes here too ----------
-        const extra = await page.evaluate((normStr) => {
-          const norm = eval(normStr);
-          const body = norm(document.body.innerText || "");
-
-          const quality =
-            (body.match(/Overall\s+Quality\s+Based\s+on\s+\d+\s+ratings?\s*([\d.]{1,3})/i) || [])[1] ||
-            (body.match(/\b([\d.]{1,3})\s*\/\s*5\b/) || [])[1] ||
-            null;
-
-          const numRatings =
-            (body.match(/Overall\s+Quality\s+Based\s+on\s+(\d+)\s+ratings?/i) || [])[1] || null;
-
-          const would =
-            (body.match(/(\d{1,3})%\s*Would\s*take\s*again/i) || [])[1] ||
-            (body.match(/Would\s*take\s*again\s*[:\s]+(\d{1,3})%/i) || [])[1] ||
-            null;
-
-          const difficulty =
-            (body.match(/Level\s+of\s+Difficulty\s*([\d.]{1,3})/i) || [])[1] ||
-            (body.match(/([\d.]{1,3})\s*Level\s+of\s+Difficulty/i) || [])[1] ||
-            null;
-
-          const dept =
-            (body.match(/in\s+the\s+([A-Za-z &'-]+?)\s+department\b/i) || [])[1] ||
-            (body.match(/Professor\s+in\s+the\s+([A-Za-z &'-]+?)\s+department/i) || [])[1] ||
-            null;
-
-          return { quality, numRatings, wouldTakeAgain: would, difficulty, dept };
-        }, normJS);
-
-        if (extra.quality) t.quality = extra.quality;
-        if (extra.numRatings) t.numRatings = extra.numRatings;
-        if (extra.wouldTakeAgain) t.wouldTakeAgain = extra.wouldTakeAgain;
-        if (extra.difficulty) t.difficulty = extra.difficulty;
-        if (extra.dept && !t.dept) t.dept = extra.dept;
-      } catch {}
-    }
-
-    if (!pool.length) {
-      clearTimeout(overallTimer);
-      const payload = { count: 0, top: null, others: [], school: SCHOOL_NAME, all };
+    // If nothing found, still return a friendly payload
+    if (!out.count) {
+      const payload = { count: 0, top: null, others: [], school: SCHOOL_NAME, all, searchUrl: out.searchUrl };
       rmpSet(name, all, payload);
       return res.json(payload);
     }
 
-    const nameLc = name.toLowerCase();
-    const scored = pool
-      .map((r) => {
-        const n = (r.name || "").toLowerCase();
-        let score = 0;
-        if (n === nameLc) score += 3;
-        if (n.startsWith(nameLc)) score += 2;
-        if (n.includes(nameLc)) score += 1;
-        const ratingsNum = parseInt(String(r.numRatings || "").replace(/\D+/g, ""), 10) || 0;
-        score += Math.min(2, Math.floor(ratingsNum / 10));
-        if (ratingsNum > 0) score += 1;
-        return { score, r };
-      })
-      .sort((a, b) => b.score - a.score)
-      .map((x) => x.r);
-
-    const top = scored[0];
-    const others = scored.slice(1);
-
-    clearTimeout(overallTimer);
-    const payload = { count: scored.length, top, others, school: SCHOOL_NAME, all };
+    const payload = { count: out.count, top: out.top, others: out.others, school: SCHOOL_NAME, all };
     rmpSet(name, all, payload);
-    res.json(payload);
+    return res.json(payload);
   } catch (e) {
-    clearTimeout(overallTimer);
     console.error("rmp error:", e?.message || e);
-    res.status(500).json({ error: "RMP scrape failed", detail: String(e?.message || e) });
-  } finally {
-    try { await page?.close(); } catch {}
+    return res.status(500).json({ error: "RMP scrape failed", detail: String(e?.message || e) });
   }
 });
 
