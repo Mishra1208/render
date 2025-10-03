@@ -279,34 +279,45 @@ app.get("/api/rmp", async (req, res) => {
 
   const results = await page.evaluate((normStr) => {
   const norm = eval(normStr);
-  const anchors = Array.from(document.querySelectorAll('a[href^="/professor/"]'));
-  if (!anchors.length) return [];
 
-  const pickName = (raw) => {
-    const s = norm(raw);
+  // Collect anchors from several likely containers/selectors
+  const anchorSets = [
+    'a[href^="/professor/"]',
+    '[data-testid*="search"] a[href*="/professor/"]',
+    '[class*="Card"] a[href*="/professor/"]',
+    'article a[href*="/professor/"]'
+  ];
+
+  const seenHref = new Set();
+  const found = [];
+
+  function pickName(el, fallbackText) {
+    const s = norm(el?.innerText || fallbackText || "");
     const m = s.match(/^[A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){1,3}$/);
-    return m ? m[0] : s;
-  };
+    return m ? m[0] : s.split("\n")[0];
+  }
 
-  const uniq = new Map();
-  for (const a of anchors) {
+  function pushFromAnchor(a) {
     const href = a.getAttribute("href");
-    const card =
-      a.closest("article") ||
-      a.closest('[class*="Card"]') ||
-      a.closest("section") ||
-      a.closest("div");
+    if (!href || !href.includes("/professor/") || seenHref.has(href)) return;
+
+    const card = a.closest("article") ||
+                 a.closest('[class*="Card"]') ||
+                 a.closest("section") ||
+                 a.closest("div");
 
     const txt = norm(card?.innerText || a.innerText || document.body.innerText || "");
-    const name = pickName(a.innerText || a.textContent || txt);
 
+    // Name guess
+    const name = pickName(a, txt);
+
+    // Parse fields loosely
     const quality =
       (txt.match(/QUALITY\s*([\d.]+)/i) || [])[1] ||
       (txt.match(/\boverall quality\b.*?([\d.]+)/i) || [])[1] ||
       (txt.match(/\b([\d.]+)\s*(?:quality|overall)\b/i) || [])[1] ||
       null;
 
-    // difficulty: both orders, tolerant
     let difficulty = null;
     let m =
       txt.match(/level\s*of\s*difficulty\s*[:\s]*([\d.]{1,3})(?:\s*\/\s*5)?/i) ||
@@ -330,22 +341,28 @@ app.get("/api/rmp", async (req, res) => {
     );
     const dept = deptMatch ? deptMatch[0] : null;
 
-    if (href && name && !uniq.has(href)) {
-      uniq.set(href, {
-        name,
-        school,
-        dept,
-        quality,
-        difficulty,
-        wouldTakeAgain: would,
-        numRatings,
-        url: `https://www.ratemyprofessors.com${href}`,
-        blockText: txt,
-      });
-    }
+    seenHref.add(href);
+    found.push({
+      name,
+      school,
+      dept,
+      quality,
+      difficulty,
+      wouldTakeAgain: would,
+      numRatings,
+      url: `https://www.ratemyprofessors.com${href}`,
+      blockText: txt,
+    });
   }
-  return Array.from(uniq.values());
+
+  for (const sel of anchorSets) {
+    const anchors = Array.from(document.querySelectorAll(sel));
+    anchors.forEach(pushFromAnchor);
+  }
+
+  return found;
 }, normJS);
+
 
 // AFTER: prefer Concordia; if none, use all results so we still return something
 let pool;
@@ -357,8 +374,9 @@ if (String(all) === "true" || all) {
       (r.school && /concordia university/i.test(r.school)) ||
       /concordia university/i.test(r.blockText || "")
   );
-  pool = conly.length ? conly : results; // fallback to all schools
+  pool = conly.length ? conly : results; // ✅ fallback to all schools if none tagged Concordia
 }
+console.log("[rmp] results:", results.length, "chosen pool:", pool.length);
 
 
 
