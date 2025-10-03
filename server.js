@@ -216,56 +216,127 @@ async function fetchHtml(url, timeoutMs = 12000) {
   return await resp.text();
 }
 
+function deepFind(obj, pred) {
+  if (!obj || typeof obj !== "object") return null;
+  if (pred(obj)) return obj;
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    const hit = deepFind(v, pred);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function extractProfFromProfileHtml(html) {
   const $ = cheerio.load(html);
-  const nextJson = $("#__NEXT_DATA__").text();
   const info = {};
+  const next = $("#__NEXT_DATA__").text();
 
-  // Helper to pull with regex from a string
-  const pull = (str, re) => {
-    const m = str.match(re);
-    return m ? m[1] : null;
-  };
+  // Prefer structured data from __NEXT_DATA__
+  if (next) {
+    try {
+      const data = JSON.parse(next);
 
-  try {
-    if (nextJson) {
-      // Use string search to be resilient across minor payload shape changes.
-      info.name =
-        pull(nextJson, /"teacherName":"([^"]+)"/) ||
-        (pull(nextJson, /"firstName":"([^"]+)"/) &&
-          pull(nextJson, /"lastName":"([^"]+)"/) &&
-          `${pull(nextJson, /"firstName":"([^"]+)"/)} ${pull(nextJson, /"lastName":"([^"]+)"/)}`);
+      // Typical path on RMP:
+      let teacher =
+        data?.props?.pageProps?.teacher ||
+        data?.props?.pageProps?.professor;
 
-      info.dept =
-        pull(nextJson, /"teacherDepartment":"([^"]+)"/) ||
-        pull(nextJson, /"department":"([^"]+)"/);
+      // Fallback: find any object that looks like a teacher block
+      if (!teacher) {
+        teacher = deepFind(
+          data,
+          (o) =>
+            o &&
+            typeof o === "object" &&
+            ("avgRating" in o) &&
+            ("numRatings" in o)
+        );
+      }
 
-      info.school =
-        pull(nextJson, /"teacherInstitutionName":"([^"]+)"/) ||
-        pull(nextJson, /"institutionName":"([^"]+)"/);
+      if (teacher) {
+        const first =
+          teacher.firstName || teacher.tFname || null;
+        const last =
+          teacher.lastName || teacher.tLname || null;
 
-      info.quality = pull(nextJson, /"avgRating":\s*([\d.]+)/);
-      info.difficulty = pull(nextJson, /"avgDifficulty":\s*([\d.]+)/);
-      info.wouldTakeAgain = pull(nextJson, /"wouldTakeAgainPercent":\s*(-?\d+)/);
-      info.numRatings = pull(nextJson, /"numRatings":\s*(\d+)/);
+        info.name =
+          teacher.teacherName ||
+          [first, last].filter(Boolean).join(" ") ||
+          info.name;
+
+        info.dept =
+          teacher.teacherDepartment ||
+          teacher.department ||
+          info.dept;
+
+        info.school =
+          teacher.teacherInstitutionName ||
+          teacher.institutionName ||
+          teacher.school?.name ||
+          info.school;
+
+        if (teacher.avgRating != null)
+          info.quality = String(teacher.avgRating);
+
+        if (teacher.avgDifficulty != null)
+          info.difficulty = String(teacher.avgDifficulty);
+
+        if (typeof teacher.wouldTakeAgainPercent === "number" && teacher.wouldTakeAgainPercent >= 0) {
+          info.wouldTakeAgain = String(teacher.wouldTakeAgainPercent);
+        }
+
+        if (teacher.numRatings != null)
+          info.numRatings = String(teacher.numRatings);
+      }
+    } catch {
+      // ignore JSON parse errors & fall back to text scraping
     }
-  } catch {
-    // ignore JSON parse failures; we'll try text fallback below
   }
 
-  // Fallbacks (visible text)
-  if (!info.name) {
-    const h1 = norm($("h1").first().text());
-    if (h1) info.name = h1;
-  }
-  if (!info.quality) info.quality = pull(html, /Overall\s+Quality[^0-9]*([\d.]+)/i);
-  if (!info.difficulty) info.difficulty = pull(html, /Level\s+of\s+Difficulty[^0-9]*([\d.]+)/i);
-  if (!info.numRatings) info.numRatings = pull(html, /Based\s+on\s+(\d+)\s+ratings?/i);
+  // --------- Text fallbacks (safer patterns) ----------
+  const body = $("body").text();
 
-  if (info.wouldTakeAgain && Number(info.wouldTakeAgain) < 0) info.wouldTakeAgain = null;
+  // Dept (e.g., "Professor in the Biology department")
+  if (!info.dept) {
+    const m =
+      body.match(/in\s+the\s+([A-Za-z &' -]+?)\s+department\b/i) ||
+      body.match(/\bdepartment:\s*([A-Za-z &' -]+)\b/i);
+    if (m) info.dept = m[1].trim();
+  }
+
+  // Would take again: "85% Would take again" or "Would take again: 85%"
+  if (!info.wouldTakeAgain) {
+    const m =
+      body.match(/(\d{1,3})%\s*Would\s*take\s*again/i) ||
+      body.match(/Would\s*take\s*again\s*[:\s]+(\d{1,3})%/i);
+    if (m) info.wouldTakeAgain = m[1];
+  }
+
+  // Quality: avoid grabbing the ratings count. Prefer "4.3 / 5".
+  if (!info.quality) {
+    const m = body.match(/\b([0-5](?:\.\d)?)\s*\/\s*5\b/);
+    if (m) info.quality = m[1];
+  }
+
+  // Difficulty
+  if (!info.difficulty) {
+    const m =
+      body.match(/Level\s+of\s+Difficulty\s*([\d.]{1,3})/i) ||
+      body.match(/\bDifficulty\s*[:\s]*([\d.]{1,3})\b/i);
+    if (m) info.difficulty = m[1];
+  }
+
+  // Num ratings: "Based on 8 ratings"
+  if (!info.numRatings) {
+    const m = body.match(/Based\s+on\s+(\d+)\s+ratings?/i);
+    if (m) info.numRatings = m[1];
+  }
 
   return info;
 }
+
+
 
 async function rmpSearchAndProfile(name, schoolId) {
   const searchUrl = `https://www.ratemyprofessors.com/search/professors/${schoolId}?q=${encodeURIComponent(
