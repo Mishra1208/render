@@ -379,10 +379,6 @@ if (String(all) === "true" || all) {
 console.log("[rmp] results:", results.length, "chosen pool:", pool.length);
 
 
-
-
-
-
     // 2) Enrich missing fields from profile
     const needsEnrich = pool.slice(0, 3).filter(
       (r) => !r.difficulty || !r.quality || !r.numRatings || !r.dept
