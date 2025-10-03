@@ -368,38 +368,52 @@ function extractProfFromProfileHtml(html) {
   }
 
   // Difficulty again from full-body text
-  // Difficulty: be aggressive—find the label and scan its container for 0–5 (with one decimal).
-if (!info.difficulty) {
-  const label = $('*')
-    .filter((_, el) => /level\s*of\s*difficulty/i.test($(el).text()))
-    .first();
+  // Difficulty: be very liberal — look around the label, aria labels, and nearby containers
+  if (!info.difficulty) {
+    const normTxt = (el) => norm($(el).text() || "");
 
-  if (label.length) {
-    const scope = label.closest('[class*="Card"], [class*="Teacher"], section, div');
-    const txtRaw = (scope.length ? scope : label.parent()).text();
+    // 1) Any element that literally contains the label
+    const labelNode = $('*:contains("Level of Difficulty")').first();
+    const searchZones = [];
 
-    // Normalize text, drop percentages like "94%" so we don't pick them up.
-    const txt = String(txtRaw)
-      .replace(/\u00A0/g, ' ')
-      .replace(/[\u200B-\u200D\uFEFF]/g, '')
-      .replace(/\s+/g, ' ')
-      .replace(/\d{1,3}%/g, '')     // remove e.g. "94%"
-      .replace(/[—–-]/g, ' ')       // odd dashes
-      .trim();
+    if (labelNode.length) {
+      searchZones.push(labelNode);
+      // siblings and parents often hold the numeric value
+      searchZones.push(labelNode.next());
+      searchZones.push(labelNode.prev());
+      const parent = labelNode.parent();
+      if (parent.length) {
+        searchZones.push(parent);
+        searchZones.push(parent.children().eq(0));
+        searchZones.push(parent.children().eq(1));
+      }
+      // sometimes the number is a little higher up
+      const gparent = parent.parent();
+      if (gparent.length) searchZones.push(gparent);
+    }
 
-    const m = txt.match(/\b(?:[0-4](?:\.\d)?|5(?:\.0)?)\b/); // 0–5, one decimal
-    if (m) info.difficulty = m[0];
+    // 2) Elements with an aria-label mentioning the phrase
+    $('*[aria-label]').each((_, el) => {
+      const aria = ($(el).attr('aria-label') || '').toLowerCase();
+      if (aria.includes('level of difficulty')) searchZones.push(el);
+    });
+
+    // 3) The whole body as a final safety net
+    searchZones.push('body');
+
+    // Scan each zone for a strict 0–5 number (allows one decimal)
+    let found = null;
+    for (const z of searchZones) {
+      const txt = typeof z === 'string' ? normTxt(z) : normTxt(z);
+      // Prefer patterns that keep the label close to the number
+      found = firstMatch(txt, /Level\s*of\s*Difficulty[^0-9]*([0-4](?:\.\d)?|5(?:\.0)?)/i)
+           || firstMatch(txt, /([0-4](?:\.\d)?|5(?:\.0)?)\s*(?:\/\s*5)?\s*(?:Level\s*of\s*Difficulty)/i)
+           || firstMatch(txt, /\b(?:Difficulty|level of difficulty)\s*[:\s]*([0-4](?:\.\d)?|5(?:\.0)?)\b/i);
+      if (found) break;
+    }
+    if (found) info.difficulty = found;
   }
-}
 
-// Final text fallback from the whole page:
-if (!info.difficulty) {
-  const body = $('body').text().replace(/\d{1,3}%/g, '');
-  const m =
-    body.match(/Level\s+of\s+Difficulty\s*[:\s-]*([0-5](?:\.\d)?)/i) ||
-    body.match(/\bDifficulty\s*[:\s-]*([0-5](?:\.\d)?)\b/i);
-  if (m) info.difficulty = m[1];
-}
 
 
   return info;
