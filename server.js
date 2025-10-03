@@ -234,32 +234,44 @@ function pickFirst(...vals) {
   return null;
 }
 
+function firstMatch(text, re) {
+  const m = text.match(re);
+  return m ? m[1] : null;
+}
+
 function extractProfFromProfileHtml(html) {
   const $ = cheerio.load(html);
   const info = {};
   const next = $("#__NEXT_DATA__").text();
 
-  // ---------- 1) Prefer structured data ----------
+  const pickFirst = (...vals) => vals.find(v => v !== undefined && v !== null && v !== "") ?? null;
+  const norm = (s="") => String(s).replace(/\u00A0/g," ").replace(/[\u200B-\u200D\uFEFF]/g,"").replace(/\s+/g," ").trim();
+
+  /* -------- 1) Prefer structured data from __NEXT_DATA__ when present -------- */
   if (next) {
     try {
       const data = JSON.parse(next);
 
-      // Typical path (but RMP moves this around sometimes)
+      // Typical location, but RMP moves this around; so fall back to a deep find.
       let teacher =
         data?.props?.pageProps?.teacher ||
         data?.props?.pageProps?.professor;
 
-      // Broad fallback: find any object that looks like a teacher rating block
       if (!teacher) {
-        teacher = deepFind(
-          data,
-          (o) =>
-            o && typeof o === "object" &&
-            (
-              "avgRating" in o || "avgDifficulty" in o ||
-              "wouldTakeAgainPercent" in o || "numRatings" in o
-            )
-        );
+        // Find any object that looks like a teacher/rating aggregate.
+        const stack = [data];
+        while (stack.length) {
+          const v = stack.pop();
+          if (v && typeof v === "object") {
+            // Heuristic: objects that have one of the fields we care about.
+            if (
+              "avgRating" in v || "avgDifficulty" in v ||
+              "wouldTakeAgainPercent" in v || "numRatings" in v ||
+              "teacherName" in v || ("firstName" in v && "lastName" in v)
+            ) { teacher = v; break; }
+            for (const k of Object.keys(v)) stack.push(v[k]);
+          }
+        }
       }
 
       if (teacher) {
@@ -271,12 +283,7 @@ function extractProfFromProfileHtml(html) {
           [first, last].filter(Boolean).join(" ") ||
           info.name;
 
-        info.dept = pickFirst(
-          teacher.teacherDepartment,
-          teacher.department,
-          info.dept
-        );
-
+        info.dept = pickFirst(teacher.teacherDepartment, teacher.department, info.dept);
         info.school = pickFirst(
           teacher.teacherInstitutionName,
           teacher.institutionName,
@@ -284,99 +291,96 @@ function extractProfFromProfileHtml(html) {
           info.school
         );
 
-        // Be liberal in what keys we accept
-        const q = pickFirst(
-          teacher.avgRating,
-          teacher.avgRatingRounded,
-          teacher.overallRating,
-          teacher.overall
-        );
+        const q = pickFirst(teacher.avgRating, teacher.avgRatingRounded, teacher.overallRating, teacher.overall);
         if (q != null) info.quality = String(q);
 
-        const d = pickFirst(
-          teacher.avgDifficulty,
-          teacher.averageDifficulty,
-          teacher.difficulty
-        );
+        const d = pickFirst(teacher.avgDifficulty, teacher.averageDifficulty, teacher.difficulty);
         if (d != null) info.difficulty = String(d);
 
-        const w = pickFirst(
-          teacher.wouldTakeAgainPercent,
-          teacher.would_take_again_percent
-        );
+        const w = pickFirst(teacher.wouldTakeAgainPercent, teacher.would_take_again_percent);
         if (typeof w === "number" && w >= 0) info.wouldTakeAgain = String(w);
 
-        const n = pickFirst(
-          teacher.numRatings,
-          teacher.numberOfRatings,
-          teacher.ratingCount,
-          teacher.ratingsCount
-        );
+        const n = pickFirst(teacher.numRatings, teacher.numberOfRatings, teacher.ratingCount, teacher.ratingsCount);
         if (n != null) info.numRatings = String(n);
       }
-    } catch {
-      // ignore JSON parse errors
-    }
+    } catch {/* ignore */}
   }
 
-  // ---------- 2) DOM selector fallbacks ----------
-  // Overall quality value is often in .RatingValue__Numerator*
+  /* -------- 2) DOM selector fallbacks (SSR content we can select) -------- */
+
+  // Name: RMP renders the prof name in the page heading and in og:title
+  if (!info.name) {
+    const h1 = norm($("h1").first().text());
+    const og = $('meta[property="og:title"]').attr("content");
+    const ogName = og ? norm(og.split(" at ")[0]) : null;
+    info.name = pickFirst(h1, ogName, info.name);
+  }
+
+  // Quality: the big number often sits in a class like RatingValue__Numerator*
   if (!info.quality) {
-    const qSel = $('[class*="RatingValue__Numerator"]').first().text().trim();
+    const qSel = norm($('[class*="RatingValue__Numerator"]').first().text());
     if (/^[0-5](?:\.\d+)?$/.test(qSel)) info.quality = qSel;
   }
 
-  // Difficulty: look for a block that mentions "Level of Difficulty"
+  // Difficulty: be aggressive — find a label that contains the phrase and scan its container for the first 0–5 number.
   if (!info.difficulty) {
-    // find the smallest block that contains the phrase and a 0–5 number
-    const cand = $('*').filter((_, el) => /Level\s+of\s+Difficulty/i.test($(el).text())).first();
-    const txt = cand.text().trim();
-    const md = txt.match(/([0-5](?:\.\d+)?)/);
-    if (md) info.difficulty = md[1];
+    const label = $('*')
+      .filter((_, el) => /Level\s+of\s+Difficulty/i.test($(el).text()))
+      .first();
+
+    if (label.length) {
+      // Search the closest reasonable container for a number between 0 and 5 (allow one decimal)
+      const scope = label.closest("div").length ? label.closest("div") : label.parent();
+      const txt = norm(scope.text());
+      // Strict 0–5 with optional .0–.9, avoids grabbing 94 from "Would take again 94%"
+      const d = firstMatch(txt, /\b(?:[0-4](?:\.\d)?|5(?:\.0)?)\b/);
+      if (d) info.difficulty = d;
+    }
   }
 
-  // Num ratings: look for "(Based on 849 ratings)" type text
+  // Num ratings: look for “Based on 849 ratings”
   if (!info.numRatings) {
-    const body = $("body").text();
-    const m = body.match(/Based\s+on\s+(\d+)\s+ratings?/i);
-    if (m) info.numRatings = m[1];
+    const n = firstMatch(norm($("body").text()), /Based\s+on\s+(\d+)\s+ratings?/i);
+    if (n) info.numRatings = n;
   }
 
-  // ---------- 3) Text fallbacks (final safety net) ----------
-  const body = $("body").text();
+  /* -------- 3) Text fallbacks (final safety net) -------- */
+  const body = norm($("body").text());
 
-  // Dept (e.g., "Professor in the Biology department")
+  // Dept (e.g., “Professor in the Computer Science department”)
   if (!info.dept) {
-    const m =
-      body.match(/in\s+the\s+([A-Za-z &' -]+?)\s+department\b/i) ||
-      body.match(/\bdepartment:\s*([A-Za-z &' -]+)\b/i);
-    if (m) info.dept = m[1].trim();
+    const dept = firstMatch(body, /in\s+the\s+([A-Za-z &' -]+?)\s+department\b/i) ||
+                 firstMatch(body, /\bdepartment:\s*([A-Za-z &' -]+)\b/i);
+    if (dept) info.dept = dept;
   }
 
-  // Would take again: "85% Would take again" or "Would take again: 85%"
+  // Would take again: “94% Would take again”
   if (!info.wouldTakeAgain) {
-    const m =
-      body.match(/(\d{1,3})%\s*Would\s*take\s*again/i) ||
-      body.match(/Would\s*take\s*again\s*[:\s]+(\d{1,3})%/i);
-    if (m) info.wouldTakeAgain = m[1];
+    const w = firstMatch(body, /(\d{1,3})%\s*Would\s*take\s*again/i) ||
+              firstMatch(body, /Would\s*take\s*again\s*[:\s]+(\d{1,3})%/i);
+    if (w) info.wouldTakeAgain = w;
   }
 
-  // Quality: "4.9 / 5" or "4.9 out of 5"
+  // Quality from “4.8 / 5” or “4.8 out of 5”
   if (!info.quality) {
-    const m = body.match(/\b([0-5](?:\.\d)?)\s*(?:\/|out of)\s*5\b/i);
-    if (m) info.quality = m[1];
+    const q = firstMatch(body, /\b([0-5](?:\.\d)?)\s*(?:\/|out of)\s*5\b/i);
+    if (q) info.quality = q;
   }
 
-  // Difficulty again (case variants)
+  // Difficulty again from full-body text
   if (!info.difficulty) {
-    const m =
-      body.match(/Level\s+of\s+Difficulty\s*([\d.]{1,3})/i) ||
-      body.match(/\bDifficulty\s*[:\s]*([\d.]{1,3})\b/i);
-    if (m) info.difficulty = m[1];
+    const d = firstMatch(body, /Level\s+of\s+Difficulty\s*([\d.]{1,3})/i) ||
+              firstMatch(body, /\bDifficulty\s*[:\s]*([\d.]{1,3})\b/i);
+    if (d) info.difficulty = d;
   }
 
   return info;
 }
+
+
+
+
+
 
 
 async function rmpSearchAndProfile(name, schoolId) {
