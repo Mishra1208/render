@@ -368,11 +368,39 @@ function extractProfFromProfileHtml(html) {
   }
 
   // Difficulty again from full-body text
-  if (!info.difficulty) {
-    const d = firstMatch(body, /Level\s+of\s+Difficulty\s*([\d.]{1,3})/i) ||
-              firstMatch(body, /\bDifficulty\s*[:\s]*([\d.]{1,3})\b/i);
-    if (d) info.difficulty = d;
+  // Difficulty: be aggressive—find the label and scan its container for 0–5 (with one decimal).
+if (!info.difficulty) {
+  const label = $('*')
+    .filter((_, el) => /level\s*of\s*difficulty/i.test($(el).text()))
+    .first();
+
+  if (label.length) {
+    const scope = label.closest('[class*="Card"], [class*="Teacher"], section, div');
+    const txtRaw = (scope.length ? scope : label.parent()).text();
+
+    // Normalize text, drop percentages like "94%" so we don't pick them up.
+    const txt = String(txtRaw)
+      .replace(/\u00A0/g, ' ')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\d{1,3}%/g, '')     // remove e.g. "94%"
+      .replace(/[—–-]/g, ' ')       // odd dashes
+      .trim();
+
+    const m = txt.match(/\b(?:[0-4](?:\.\d)?|5(?:\.0)?)\b/); // 0–5, one decimal
+    if (m) info.difficulty = m[0];
   }
+}
+
+// Final text fallback from the whole page:
+if (!info.difficulty) {
+  const body = $('body').text().replace(/\d{1,3}%/g, '');
+  const m =
+    body.match(/Level\s+of\s+Difficulty\s*[:\s-]*([0-5](?:\.\d)?)/i) ||
+    body.match(/\bDifficulty\s*[:\s-]*([0-5](?:\.\d)?)\b/i);
+  if (m) info.difficulty = m[1];
+}
+
 
   return info;
 }
