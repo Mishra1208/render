@@ -174,20 +174,54 @@ async function closeBrowser() {
 process.on("SIGINT", async () => { await closeBrowser(); process.exit(0); });
 process.on("SIGTERM", async () => { await closeBrowser(); process.exit(0); });
 
-/* -------------------------- RMP response cache --------------------------- */
-// Cache by name + all flag. Evict after 24h.
-const RMP_CACHE = new Map();
-const RMP_TTL_MS = 24 * 60 * 60 * 1000;
-const rmpKey = (name, all) => `${name.toLowerCase()}|all:${all ? 1 : 0}`;
-function rmpGet(name, all) {
-    const k = rmpKey(name, all);
-    const hit = RMP_CACHE.get(k);
-    if (hit && Date.now() - hit.ts < RMP_TTL_MS) return hit.data;
-    if (hit) RMP_CACHE.delete(k);
-    return null;
+/* -------------------- Supabase Cache -------------------- */
+const { createClient } = require('@supabase/supabase-js');
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://bytlxvgnkxgydmpmcxni.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ5dGx4dmdua3hneWRtcG1jeG5pIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY3Njk4NTksImV4cCI6MjA4MjM0NTg1OX0.aEjT8kY01Of63xkuMdWzr5ocoHmKFy4FeJJlJkHuSWQ";
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// Cache Duration: 7 Days
+const CACHE_DURATION_MS = 1000 * 60 * 60 * 24 * 7;
+
+async function rmpGet(name, all) {
+    const key = `${name.toLowerCase()}|all:${all ? 1 : 0}`;
+    try {
+        const { data, error } = await supabase
+            .from('rmp_cache')
+            .select('data, updated_at')
+            .eq('query_name', key)
+            .single();
+
+        if (error || !data) return null;
+
+        const age = Date.now() - new Date(data.updated_at).getTime();
+        if (age > CACHE_DURATION_MS) {
+            console.log(`[rmp] cache expired for ${key}`);
+            return null;
+        }
+
+        console.log(`[rmp] cache hit for ${key}`);
+        return data.data;
+    } catch (err) {
+        console.error("[rmp] cache get error:", err);
+        return null;
+    }
 }
-function rmpSet(name, all, data) {
-    RMP_CACHE.set(rmpKey(name, all), { ts: Date.now(), data });
+
+async function rmpSet(name, all, payload) {
+    const key = `${name.toLowerCase()}|all:${all ? 1 : 0}`;
+    try {
+        await supabase
+            .from('rmp_cache')
+            .upsert({
+                query_name: key,
+                data: payload,
+                updated_at: new Date().toISOString()
+            });
+        console.log(`[rmp] cache saved for ${key}`);
+    } catch (err) {
+        console.error("[rmp] cache set error:", err);
+    }
 }
 
 /* -------------------------------- Routes ------------------------------- */
@@ -269,7 +303,7 @@ app.get("/api/rmp", async (req, res) => {
     if (!name) return res.status(400).json({ error: "Missing professor name" });
 
     // 🔒 Cache check
-    const cached = rmpGet(name, all);
+    const cached = await rmpGet(name, all);
     if (cached) return res.json(cached);
 
     const searchUrl = `https://www.ratemyprofessors.com/search/professors/${SCHOOL_ID}?q=${encodeURIComponent(name)}`;

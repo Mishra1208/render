@@ -9,6 +9,7 @@
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.89.0",
     "cheerio": "^1.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
