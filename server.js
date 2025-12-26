@@ -274,9 +274,10 @@ app.get("/api/rmp", async (req, res) => {
 
     const searchUrl = `https://www.ratemyprofessors.com/search/professors/${SCHOOL_ID}?q=${encodeURIComponent(name)}`;
 
-    const OVERALL_TIMEOUT_MS = 20000;
+    const OVERALL_TIMEOUT_MS = 60000; // Increased to 60s
     let overallTimer;
     const hardFail = (reason) => {
+        if (res.headersSent) return;
         clearTimeout(overallTimer);
         res.status(504).json({ error: "RMP scrape timeout", detail: reason || "timeout" });
     };
@@ -423,6 +424,7 @@ app.get("/api/rmp", async (req, res) => {
 
         for (const t of needsEnrich) {
             try {
+                if (res.headersSent) break; // Optimization: stop if timeout already fired
                 await page.goto(t.url, { waitUntil: "domcontentloaded", timeout: 60000 });
                 await sleep(600);
 
@@ -473,7 +475,8 @@ app.get("/api/rmp", async (req, res) => {
             clearTimeout(overallTimer);
             const payload = { count: 0, top: null, others: [], school: SCHOOL_NAME, all };
             rmpSet(name, all, payload);
-            return res.json(payload);
+            if (!res.headersSent) res.json(payload);
+            return;
         }
 
         // 3) Score & respond
@@ -499,11 +502,11 @@ app.get("/api/rmp", async (req, res) => {
         clearTimeout(overallTimer);
         const payload = { count: scored.length, top, others, school: SCHOOL_NAME, all };
         rmpSet(name, all, payload); // ✅ cache it
-        res.json(payload);
+        if (!res.headersSent) res.json(payload);
     } catch (e) {
         clearTimeout(overallTimer);
         console.error("rmp error:", e?.message || e);
-        res.status(500).json({ error: "RMP scrape failed", detail: String(e) });
+        if (!res.headersSent) res.status(500).json({ error: "RMP scrape failed", detail: String(e) });
     } finally {
         try { await page?.close(); } catch { } // ✅ close tab, keep browser alive
     }
