@@ -149,16 +149,15 @@ async function searchReddit({ subreddits, searchQ, afterTs, limit, perCallTimeou
 let _browserPromise = null;
 async function getBrowser() {
     if (!_browserPromise) {
-        const { executablePath } = require("puppeteer"); // keep this import at top or here
+        // const { executablePath } = require("puppeteer"); // Not needed for auto-resolve
         const flags = (process.env.CHROME_FLAGS || "--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage --disable-gpu --headless=new").split(" ");
 
-        const exe = executablePath(); // <- use the path that puppeteer installed
-        console.log("[puppeteer] using chrome at:", exe);
+        console.log("[puppeteer] launching browser with flags:", flags);
 
         _browserPromise = require("puppeteer-extra").launch({
             headless: true,
             args: flags,
-            executablePath: exe,        // <— key line
+            // executablePath: exe, // Let Puppeteer find the bundled Chrome automatically
         });
     }
     return _browserPromise;
